@@ -1,0 +1,45 @@
+index="*" sourcetype="kube:object:resourcequotas"
+| spath
+| eval cluster=coalesce('k8s.cluster.name', cluster)
+| eval namespace=coalesce('metadata.namespace','k8s.namespace.name', namespace)
+
+/* ---- pull raw fields from spec.hard ---- */
+| eval pods_raw = coalesce('spec.hard.pods','spec.hard."count/pods"')
+| eval mem_l_raw = 'spec.hard."limits.memory"',   mem_r_raw = 'spec.hard."requests.memory"'
+| eval cpu_l_raw = 'spec.hard."limits.cpu"',      cpu_r_raw = 'spec.hard."requests.cpu"'
+
+/* ---- normalize units: memory -> bytes, cpu -> cores ---- */
+| eval pods_quota = tonumber(pods_raw)
+| eval mem_limit_quota = case(
+      isnull(mem_l_raw), null(),
+      match(mem_l_raw,"Ti$"), tonumber(replace(mem_l_raw,"Ti$",""))*1024*1024*1024*1024,
+      match(mem_l_raw,"Gi$"), tonumber(replace(mem_l_raw,"Gi$",""))*1024*1024*1024,
+      match(mem_l_raw,"Mi$"), tonumber(replace(mem_l_raw,"Mi$",""))*1024*1024,
+      match(mem_l_raw,"Ki$"), tonumber(replace(mem_l_raw,"Ki$",""))*1024,
+      true(), tonumber(mem_l_raw)
+    )
+| eval mem_request_quota = case(
+      isnull(mem_r_raw), null(),
+      match(mem_r_raw,"Ti$"), tonumber(replace(mem_r_raw,"Ti$",""))*1024*1024*1024*1024,
+      match(mem_r_raw,"Gi$"), tonumber(replace(mem_r_raw,"Gi$",""))*1024*1024*1024,
+      match(mem_r_raw,"Mi$"), tonumber(replace(mem_r_raw,"Mi$",""))*1024*1024,
+      match(mem_r_raw,"Ki$"), tonumber(replace(mem_r_raw,"Ki$",""))*1024,
+      true(), tonumber(mem_r_raw)
+    )
+| eval cpu_limit_quota = if(isnull(cpu_l_raw), null(),
+                            if(match(cpu_l_raw,"m$"),
+                               tonumber(replace(cpu_l_raw,"m$",""))/1000,
+                               tonumber(cpu_l_raw)))
+| eval cpu_request_quota = if(isnull(cpu_r_raw), null(),
+                              if(match(cpu_r_raw,"m$"),
+                                 tonumber(replace(cpu_r_raw,"m$",""))/1000,
+                                 tonumber(cpu_r_raw)))
+
+/* ---- keep only namespaces with any quota > 0 ---- */
+| where coalesce(pods_quota,0)>0 OR coalesce(mem_limit_quota,0)>0 OR coalesce(mem_request_quota,0)>0
+    OR coalesce(cpu_limit_quota,0)>0 OR coalesce(cpu_request_quota,0)>0
+
+/* ---- summarize (one row per namespace/quota object) ---- */
+| table cluster namespace metadata.name pods_quota mem_limit_quota mem_request_quota cpu_limit_quota cpu_request_quota
+| rename metadata.name as resourcequota_name
+| sort cluster, namespace, resourcequota_name
