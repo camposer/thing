@@ -1,0 +1,6 @@
+
+def retractionCmds = domains.collect { domain ->
+    def dn = domain.name.replaceAll("\\.", "_")
+    def dEnv = domain.targetEnv
+    "\${CI_DIR}/scripts/generate_retractions/${dEnv}_${dn}.sh"
+}.join("\n")
