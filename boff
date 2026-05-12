@@ -1,17 +1,6 @@
-Groovy side:
-
-groovy
-
-def retractionScripts = domains.collect { domain ->
+List retractionBases = []
+for (domain in domains) {
     def dn = domain.name.replaceAll("\\.", "_")
-    "${domain.targetEnv}_${dn}.sh"
-}.join(" ")
-
--e RETRACTION_SCRIPTS="${retractionScripts}" \
-In the shell block, after vault:
-
-bash
-
-    for script in $RETRACTION_SCRIPTS; do
-        ${CI_DIR}/scripts/generate_retractions/${script}
-    done
+    retractionBases.add("${domain.targetEnv}_${dn}")
+}
+String retractionBasesStr = retractionBases.join(" ")
