@@ -1,6 +1,25 @@
+import groovy.json.JsonOutput
+
 List retractionBases = []
+Map uatLoadMap = [:]
+Map prodLoadMap = [:]
+
 for (domain in domains) {
     def dn = domain.name.replaceAll("\\.", "_")
     retractionBases.add("${domain.targetEnv}_${dn}")
+
+    if (domain.targetEnv == "uat") {
+        uatLoadMap[domain.name] = domain.loadProviderInstanceName
+    } else if (domain.targetEnv == "prod") {
+        prodLoadMap[domain.name] = domain.loadProviderInstanceName
+    }
 }
+
 String retractionBasesStr = retractionBases.join(" ")
+String uatLoadMapJson = JsonOutput.toJson(uatLoadMap)
+String prodLoadMapJson = JsonOutput.toJson(prodLoadMap)
+
+for name in \$(echo "\$UAT_LOAD_MAP" | python3 -c "import sys,json;[print(k) for k in json.load(sys.stdin)]"); do
+                pin=\$(echo "\$UAT_LOAD_MAP" | python3 -c "import sys,json;print(json.load(sys.stdin)[sys.argv[1]])" "\$name")
+                writ-tools execute-provider-instance --target uat-ci "\$name" "\$pin" "\$EXPORT_DIR/export.\$EXPORT_FORMAT"
+            done
