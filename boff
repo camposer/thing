@@ -1,25 +1,21 @@
-import groovy.json.JsonOutput
+[
+ [:db/add     :thing.pcf.attestation.pcf_recharge_data/app_instance_id
+              :db/ident :thing.pcf.attestation.pcf_recharge_data.retired-10/app_instance_id]
+ [:db/retract :thing.pcf.attestation.pcf_recharge_data/app_instance_id
+              :db/domain "thing.pcf"]
+ [:db/add     :thing.pcf.attestation.pcf_recharge_data/app_instance_id
+              :db/doc "Retired 2026-06-15 — removed from domain"]
 
-List retractionBases = []
-Map uatLoadMap = [:]
-Map prodLoadMap = [:]
+ ;; 2. Recreate app_instance_id as a plain (non-identity) string attribute.
+ {:db/ident       :thing.pcf.attestation.pcf_recharge_data/app_instance_id
+  :db/domain      "thing.pcf"
+  :db/valueType   :db.type/string
+  :db/cardinality :db.cardinality/one}
 
-for (domain in domains) {
-    def dn = domain.name.replaceAll("\\.", "_")
-    retractionBases.add("${domain.targetEnv}_${dn}")
-
-    if (domain.targetEnv == "uat") {
-        uatLoadMap[domain.name] = domain.loadProviderInstanceName
-    } else if (domain.targetEnv == "prod") {
-        prodLoadMap[domain.name] = domain.loadProviderInstanceName
-    }
-}
-
-String retractionBasesStr = retractionBases.join(" ")
-String uatLoadMapJson = JsonOutput.toJson(uatLoadMap)
-String prodLoadMapJson = JsonOutput.toJson(prodLoadMap)
-
-for name in \$(echo "\$UAT_LOAD_MAP" | python3 -c "import sys,json;[print(k) for k in json.load(sys.stdin)]"); do
-                pin=\$(echo "\$UAT_LOAD_MAP" | python3 -c "import sys,json;print(json.load(sys.stdin)[sys.argv[1]])" "\$name")
-                writ-tools execute-provider-instance --target uat-ci "\$name" "\$pin" "\$EXPORT_DIR/export.\$EXPORT_FORMAT"
-            done
+ ;; 3. New field shaped like the current _match_key (unique identity, string, one).
+ {:db/ident       :thing.pcf.attestation.pcf_recharge_data/_match_key_v2
+  :db/domain      "thing.pcf"
+  :db/valueType   :db.type/string
+  :db/unique      :db.unique/identity
+  :db/cardinality :db.cardinality/one}
+]
