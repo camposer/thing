@@ -1,21 +1,74 @@
-[
- [:db/add     :thing.pcf.attestation.pcf_recharge_data/app_instance_id
-              :db/ident :thing.pcf.attestation.pcf_recharge_data.retired-10/app_instance_id]
- [:db/retract :thing.pcf.attestation.pcf_recharge_data/app_instance_id
-              :db/domain "thing.pcf"]
- [:db/add     :thing.pcf.attestation.pcf_recharge_data/app_instance_id
-              :db/doc "Retired 2026-06-15 — removed from domain"]
+#!/usr/bin/env python3
+"""Usage:
+    cat orgs-recharge.csv | python tools/enrich_orgs.py orgs.json > enriched.json
+"""
 
- ;; 2. Recreate app_instance_id as a plain (non-identity) string attribute.
- {:db/ident       :thing.pcf.attestation.pcf_recharge_data/app_instance_id
-  :db/domain      "thing.pcf"
-  :db/valueType   :db.type/string
-  :db/cardinality :db.cardinality/one}
+import argparse
+import csv
+import json
+import sys
 
- ;; 3. New field shaped like the current _match_key (unique identity, string, one).
- {:db/ident       :thing.pcf.attestation.pcf_recharge_data/_match_key_v2
-  :db/domain      "thing.pcf"
-  :db/valueType   :db.type/string
-  :db/unique      :db.unique/identity
-  :db/cardinality :db.cardinality/one}
-]
+
+def is_blank(value):
+    """True when a JSON value counts as 'no eim_id' — missing, null, or empty."""
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def load_csv(stream):
+    """Index CSV rows by guid."""
+    by_guid = {}
+    for row in csv.DictReader(stream):
+        guid = (row.get("guid") or "").strip()
+        if guid:
+            by_guid[guid] = row
+    return by_guid
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("orgs_json", help="Path to the org JSON array file")
+    args = parser.parse_args()
+
+    csv_by_guid = load_csv(sys.stdin)
+
+    with open(args.orgs_json, encoding="utf-8") as f:
+        orgs = json.load(f)
+
+    if not isinstance(orgs, list):
+        sys.exit(f"FATAL: expected a JSON array at top level, got {type(orgs).__name__}")
+
+    enriched = 0
+    skipped_has_eim = 0
+    unmatched = 0
+    for org in orgs:
+        if not is_blank(org.get("eim_id")):
+            skipped_has_eim += 1
+            continue
+        row = csv_by_guid.get(org.get("org_guid"))
+        if row is None:
+            unmatched += 1
+            continue
+        eim_id = (row.get("eim_id") or "").strip()
+        business_app_id = (row.get("business_app_id") or "").strip()
+        if eim_id:
+            org["eim_id"] = eim_id
+        if business_app_id:
+            org["business_app_id"] = business_app_id
+        if eim_id or business_app_id:
+            enriched += 1
+
+    json.dump(orgs, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+    print(
+        f"enriched {enriched} org(s); "
+        f"{skipped_has_eim} already had an eim_id; "
+        f"{unmatched} had no matching CSV guid",
+        file=sys.stderr,
+    )
+
+
+if __name__ == "__main__":
+    main()
