@@ -1,74 +1,41 @@
-#!/usr/bin/env python3
-"""Usage:
-    cat orgs-recharge.csv | python tools/enrich_orgs.py orgs.json > enriched.json
-"""
+python3 -c '
+import json, csv, sys
 
-import argparse
-import csv
-import json
-import sys
+JSON_PATH = sys.argv[1]
+CSV_PATH  = sys.argv[2]
+JSON_KEY  = "eim_id"                 # field on each JSON org object (only some have it)
+CSV_KEY   = "eim_id"                 # matching column in the CSV
+CHECK_COL = "Business Unit Check"    # corrected value (yellow column)
 
+# 1) build  eim_id -> corrected business unit  from the CSV
+lookup = {}
+with open(CSV_PATH, newline="", encoding="utf-8-sig") as f:
+    for row in csv.DictReader(f):
+        k = (row.get(CSV_KEY) or "").strip()
+        v = (row.get(CHECK_COL) or "").strip()
+        if k and v and v.upper() != "N/A":
+            lookup[k] = v
 
-def is_blank(value):
-    """True when a JSON value counts as 'no eim_id' — missing, null, or empty."""
-    return value is None or (isinstance(value, str) and value.strip() == "")
+# 2) patch the orgs in memory
+with open(JSON_PATH, encoding="utf-8") as f:
+    orgs = json.load(f)
 
+changed = no_key = no_match = 0
+for o in orgs:
+    if JSON_KEY not in o or not str(o.get(JSON_KEY, "")).strip():
+        no_key += 1                       # no eim_id -> leave as-is
+        continue
+    k = str(o[JSON_KEY]).strip()
+    if k not in lookup:
+        no_match += 1                     # eim_id present but not in CSV -> leave as-is
+        continue
+    if o.get("business_unit") != lookup[k]:
+        o["business_unit"] = lookup[k]
+        changed += 1
 
-def load_csv(stream):
-    """Index CSV rows by guid."""
-    by_guid = {}
-    for row in csv.DictReader(stream):
-        guid = (row.get("guid") or "").strip()
-        if guid:
-            by_guid[guid] = row
-    return by_guid
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("orgs_json", help="Path to the org JSON array file")
-    args = parser.parse_args()
-
-    csv_by_guid = load_csv(sys.stdin)
-
-    with open(args.orgs_json, encoding="utf-8") as f:
-        orgs = json.load(f)
-
-    if not isinstance(orgs, list):
-        sys.exit(f"FATAL: expected a JSON array at top level, got {type(orgs).__name__}")
-
-    enriched = 0
-    skipped_has_eim = 0
-    unmatched = 0
-    for org in orgs:
-        if not is_blank(org.get("eim_id")):
-            skipped_has_eim += 1
-            continue
-        row = csv_by_guid.get(org.get("org_guid"))
-        if row is None:
-            unmatched += 1
-            continue
-        eim_id = (row.get("eim_id") or "").strip()
-        business_app_id = (row.get("business_app_id") or "").strip()
-        if eim_id:
-            org["eim_id"] = eim_id
-        if business_app_id:
-            org["business_app_id"] = business_app_id
-        if eim_id or business_app_id:
-            enriched += 1
-
-    json.dump(orgs, sys.stdout, indent=2, ensure_ascii=False)
-    sys.stdout.write("\n")
-    print(
-        f"enriched {enriched} org(s); "
-        f"{skipped_has_eim} already had an eim_id; "
-        f"{unmatched} had no matching CSV guid",
-        file=sys.stderr,
-    )
-
-
-if __name__ == "__main__":
-    main()
+# 3) patched JSON -> stdout ; summary -> stderr
+json.dump(orgs, sys.stdout, indent=2, ensure_ascii=False)
+sys.stdout.write("\n")
+print(f"Updated: {changed} | no eim_id: {no_key} | eim_id with no CSV match: {no_match}",
+      file=sys.stderr)
+' pcf_org_details.json business_unit_check.csv
