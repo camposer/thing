@@ -1,1 +1,295 @@
-kubectl -n writ-staging exec deploy/writ -- node -e "console.log(require('v8').getHeapStatistics().heap_size_limit/1048576|0,'MB')"
+# =============================================================================
+# 1. Airflow config
+# =============================================================================
+# BANK (CRITICAL): today this is a plain ConfigMap with committed dev secrets.
+# Split it: non-secret settings stay in a ConfigMap; FERNET_KEY / JWT_SECRET /
+# INGEST_API_KEY / SPLUNK_PASSWORD / admin password move to a Secret from the
+# bank's secret store (secretKeyRef, or a second `envFrom: secretRef`).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-env
+data:
+  AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+  AIRFLOW__CORE__AUTH_MANAGER: "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager"
+
+  # BANK: point at the bank's managed/persistent Postgres; password from a Secret.
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow"
+
+  # BANK (CRITICAL): COMMITTED DEV values. Generate ONCE for the bank, keep in the
+  # secret store. Rotating FERNET_KEY invalidates all stored connections/variables.
+  AIRFLOW__CORE__FERNET_KEY: "Queql4_XvqCuDjUYPKNwW1hCdCY-C-wPABRm_Y8nMqU="
+  AIRFLOW__API_AUTH__JWT_SECRET: "yIy4Q3+/B0nkZ6/6dtXcn2AvUjio79b+v88TNp0pldY="
+
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-apiserver-service:8080/execution/"
+  AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "10"
+
+  # BANK: externally-reachable Airflow URL behind the bank ingress+TLS.
+  AIRFLOW__API__BASE_URL: "http://localhost:8080"
+
+  AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+
+  # BANK (CRITICAL): admin/admin is a test credential. Move to a Secret + real
+  # password, or drop it entirely if the bank fronts Airflow with SSO/its IdP.
+  AIRFLOW_ADMIN_USERNAME: "admin"
+  AIRFLOW_ADMIN_PASSWORD: "admin"
+
+  # BANK: real WRIT ingest Service + its API key FROM A SECRET.
+  WRIT_INGEST_BASE_URL: "http://writ-service"
+  INGEST_API_KEY: "GYZnsno+eKyrtkIg3A6AlGTfkTQNmT7FMPoMM+w9j1c="
+
+  # BANK (CRITICAL): points at the LOCAL Splunk FIXTURE. Repoint to real Splunk;
+  # SPLUNK_PASSWORD from a Secret; prefer VERIFY_SSL=true + a mounted CA bundle.
+  SPLUNK_URL: "https://splunk-service:8089"
+  SPLUNK_USER: "admin"
+  SPLUNK_PASSWORD: "1W.wr1t.splunk+dev"
+  SPLUNK_VERIFY_SSL: "false"
+  SPLUNK_TIMEOUT_MS: "60000"
+---
+# =============================================================================
+# 2. Airflow metadata Postgres
+# =============================================================================
+# BANK (CRITICAL): base is EPHEMERAL (emptyDir) — wiped every CI run. In the bank
+# that loses all DAG-run history/state/connections/variables on restart. Either
+#   (a) use the bank's managed Postgres and DELETE this Deployment+Service, just
+#       set AIRFLOW__DATABASE__SQL_ALCHEMY_CONN above; or
+#   (b) keep it but back the volume with a PersistentVolumeClaim.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-postgres
+  labels: { app: airflow-postgres }
+spec:
+  selector:
+    matchLabels: { app: airflow-postgres }
+  template:
+    metadata:
+      labels: { app: airflow-postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          env:
+            # BANK: move these to secretKeyRef.
+            - { name: POSTGRES_DB, value: airflow }
+            - { name: POSTGRES_USER, value: airflow }
+            - { name: POSTGRES_PASSWORD, value: airflow }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "airflow", "-d", "airflow"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: "1", memory: 512Mi }
+      volumes:
+        # BANK (CRITICAL): replace emptyDir with a PVC:
+        #   - name: data
+        #     persistentVolumeClaim: { claimName: airflow-postgres-pvc }
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-postgres
+spec:
+  type: ClusterIP
+  selector: { app: airflow-postgres }
+  ports: [{ port: 5432, targetPort: 5432 }]
+---
+# =============================================================================
+# 3. One-shot init: migrate metadata DB + create the FAB admin user
+# =============================================================================
+# BANK: keep, but note it (re)creates the admin from the env above. If the bank
+# uses SSO/its own IdP, drop the `users create` step.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: airflow-init
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels: { app: airflow-init }
+    spec:
+      restartPolicy: OnFailure
+      # BANK: add imagePullSecrets: [{ name: <bank-registry-pull-secret> }]
+      #       if the bank cluster needs creds to pull ignitionworks/airflow.
+      containers:
+        - name: init
+          # BANK (CRITICAL): pin a version, e.g. ignitionworks/airflow:1.0.x.
+          # Test overlay rewrites this to :local; untagged defaults to :latest.
+          image: ignitionworks/airflow
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              for i in $(seq 1 60); do
+                airflow db check --retry 1 >/dev/null 2>&1 && break
+                echo "waiting for airflow-postgres... ($i)"; sleep 3
+              done
+              airflow db migrate
+              airflow users create \
+                --username "$AIRFLOW_ADMIN_USERNAME" \
+                --password "$AIRFLOW_ADMIN_PASSWORD" \
+                --firstname e2e --lastname admin --role Admin \
+                --email admin@ignition.works || true
+          envFrom:
+            - configMapRef: { name: airflow-env }
+            # BANK: + secretRef: { name: airflow-secrets } once secrets are split.
+---
+# =============================================================================
+# 4. Airflow roles: api-server, scheduler, dag-processor
+# =============================================================================
+# BANK notes that apply to all three:
+#   - Pin the image version (same as above).
+#   - Add imagePullSecrets at pod level if the registry needs creds.
+#   - Add `- secretRef: { name: airflow-secrets }` to each envFrom.
+#   - TRIGGERER is MISSING here (base omits it) but the ops/airflow README lists
+#     it as a LocalExecutor component. Add an airflow-triggerer Deployment
+#     (command ["airflow","triggerer"]) if any deferrable operator/sensor is used.
+#   - DAGs + writ_ingest are baked into the image; scheduled DAGs are stamped from
+#     the `writ_ingest_registry` Airflow Variable that the WRIT ui/ reconcile
+#     PUSHES — so the bank WRIT must reach this Airflow's API. Confirm that path.
+#   - Artifacts write to WRIT_ARTIFACT_ROOT (/opt/airflow/artifacts), unmounted =
+#     ephemeral. Mount a volume if they must survive restarts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-apiserver
+  labels: { app: airflow-apiserver }
+spec:
+  selector:
+    matchLabels: { app: airflow-apiserver }
+  template:
+    metadata:
+      labels: { app: airflow-apiserver }
+    spec:
+      initContainers:
+        - name: wait-migrations
+          image: ignitionworks/airflow   # BANK: pin version
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 60); do
+                airflow db check-migrations --migration-wait-timeout 10 && exit 0
+                echo "waiting for db migrations... ($i)"; sleep 5
+              done
+              echo "timed out waiting for migrations"; exit 1
+          envFrom: [{ configMapRef: { name: airflow-env } }]
+      containers:
+        - name: airflow
+          image: ignitionworks/airflow   # BANK: pin version
+          imagePullPolicy: IfNotPresent
+          command: ["airflow", "api-server"]
+          ports: [{ name: http, containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: airflow-env }
+            # BANK: + secretRef: { name: airflow-secrets }
+          readinessProbe:
+            httpGet: { path: /api/v2/monitor/health, port: 8080 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          livenessProbe:
+            httpGet: { path: /api/v2/monitor/health, port: 8080 }
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits:   { cpu: "1", memory: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-apiserver-service
+spec:
+  # BANK: ClusterIP is right — expose via the bank's Ingress+TLS to
+  # airflow.<bank-domain> -> this Service:8080 (no ingress.yaml included here).
+  type: ClusterIP
+  selector: { app: airflow-apiserver }
+  ports: [{ name: http, port: 8080, targetPort: 8080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+  labels: { app: airflow-scheduler }
+spec:
+  selector:
+    matchLabels: { app: airflow-scheduler }
+  template:
+    metadata:
+      labels: { app: airflow-scheduler }
+    spec:
+      initContainers:
+        - name: wait-migrations
+          image: ignitionworks/airflow   # BANK: pin version
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 60); do
+                airflow db check-migrations --migration-wait-timeout 10 && exit 0
+                echo "waiting for db migrations... ($i)"; sleep 5
+              done
+              echo "timed out waiting for migrations"; exit 1
+          envFrom: [{ configMapRef: { name: airflow-env } }]
+      containers:
+        - name: airflow
+          image: ignitionworks/airflow   # BANK: pin version
+          imagePullPolicy: IfNotPresent
+          command: ["airflow", "scheduler"]
+          envFrom:
+            - configMapRef: { name: airflow-env }
+            # BANK: + secretRef: { name: airflow-secrets }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits:   { cpu: "1", memory: 1Gi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-dag-processor
+  labels: { app: airflow-dag-processor }
+spec:
+  selector:
+    matchLabels: { app: airflow-dag-processor }
+  template:
+    metadata:
+      labels: { app: airflow-dag-processor }
+    spec:
+      initContainers:
+        - name: wait-migrations
+          image: ignitionworks/airflow   # BANK: pin version
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 60); do
+                airflow db check-migrations --migration-wait-timeout 10 && exit 0
+                echo "waiting for db migrations... ($i)"; sleep 5
+              done
+              echo "timed out waiting for migrations"; exit 1
+          envFrom: [{ configMapRef: { name: airflow-env } }]
+      containers:
+        - name: airflow
+          image: ignitionworks/airflow   # BANK: pin version
+          imagePullPolicy: IfNotPresent
+          command: ["airflow", "dag-processor"]
+          envFrom:
+            - configMapRef: { name: airflow-env }
+            # BANK: + secretRef: { name: airflow-secrets }
+          resources:
+            requests: { cpu: 100m, memory: 320Mi }
+            limits:   { cpu: "1", memory: 768Mi }
