@@ -1,17 +1,12 @@
-[:find ?name ?ref ?src
+[:find ?appId ?b1 ?b2
  :where
- [?ns :ikp.namespace/service ?svc]
- [?svc :inventory.service/name ?name]
- (or-join [[?svc] ?ref]
-   (and [?svc :inventory.service/ikpGBGF ?g] [?g :ikp.gbgf/name ?ref])
-   (and [(missing? $ ?svc :inventory.service/ikpGBGF)] [(ground "<none>") ?ref])
-   (and [?svc :inventory.service/ikpGBGF ?g2] [(missing? $ ?g2 :ikp.gbgf/name)] [(ground "<none>") ?ref]))
- (or-join [[?name] ?src]
-   (and [?b :hsbc.ikp.attestation.service_bgi/service_name ?name] [?b :hsbc.ikp.attestation.service_bgi/bgi ?src])
-   (and [?b2 :hsbc.ikp.attestation.service_bgi/service_name ?name] [(missing? $ ?b2 :hsbc.ikp.attestation.service_bgi/bgi)] [(ground "<none>") ?src])
-   (and (not [_ :hsbc.ikp.attestation.service_bgi/service_name ?name]) [(ground "<no row>") ?src]))
- [(not= ?ref ?src)]
- [(not= ?src "<no row>")]          ; drop services missing from the upload
- [(not= ?ref "<none>")]            ; drop services with no B/GI on the ref
- [(not= ?src "<none>")]            ; drop services uploaded with a blank B/GI
- [(not= ?ref "WSIT Payments")]]    ; drop the gbgf2 Payments regrouping
+ [?ba :inventory.businessApp/id ?appId]
+ (not [?ba :inventory.businessApp/operationalStatus "Retired"])
+ [?s1 :inventory.service/businessApp ?ba]
+ [?s2 :inventory.service/businessApp ?ba]
+ [_ :ikp.namespace/service ?s1]
+ [_ :ikp.namespace/service ?s2]
+ [?s1 :inventory.service/ikpGBGF ?g1] [?g1 :ikp.gbgf/name ?b1]
+ [?s2 :inventory.service/ikpGBGF ?g2] [?g2 :ikp.gbgf/name ?b2]
+ [(not= ?b1 "Unknown")] [(not= ?b2 "Unknown")]
+ [(< ?b1 ?b2)]]
