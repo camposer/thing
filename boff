@@ -1,12 +1,14 @@
-[:find ?appId ?b1 ?b2
+[:find ?appId ?appName
  :where
+ [?ns :ikp.namespace/uid _]
+ [?ns :ikp.namespace/service ?svc]
+ [?svc :inventory.service/businessApp ?ba]
  [?ba :inventory.businessApp/id ?appId]
+ [(get-else $ ?ba :inventory.businessApp/name "N/A") ?appName]
  (not [?ba :inventory.businessApp/operationalStatus "Retired"])
- [?s1 :inventory.service/businessApp ?ba]
- [?s2 :inventory.service/businessApp ?ba]
- [_ :ikp.namespace/service ?s1]
- [_ :ikp.namespace/service ?s2]
- [?s1 :inventory.service/ikpGBGF ?g1] [?g1 :ikp.gbgf/name ?b1]
- [?s2 :inventory.service/ikpGBGF ?g2] [?g2 :ikp.gbgf/name ?b2]
- [(not= ?b1 "Unknown")] [(not= ?b2 "Unknown")]
- [(< ?b1 ?b2)]]
+ (not-join [?ba]
+   [?s :inventory.service/businessApp ?ba]
+   [?n :ikp.namespace/service ?s]
+   [?n :ikp.namespace/uid _]
+   [?s :inventory.service/ikpGBGF ?g]
+   [?g :ikp.gbgf/name _])]
